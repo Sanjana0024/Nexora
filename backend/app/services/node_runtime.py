@@ -31,8 +31,10 @@ class NodeRuntime:
         return {
             "type": "ai",
             "message": f"AI node '{node.name}' executed",
-            "input": input_data,
-            "output": "AI processing result",
+            "output": {
+                "score": 85,
+                "intent": "buy",
+            },
         }
 
     async def execute_action(self, node, input_data):
