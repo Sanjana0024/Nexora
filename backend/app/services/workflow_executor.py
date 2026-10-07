@@ -1,6 +1,8 @@
 import asyncio
 
 from app.services.node_runtime import NodeRuntime
+from app.services.retry_handler import RetryHandler
+from app.models.workflow_run import WorkflowRun
 
 
 class WorkflowExecutor:
@@ -16,6 +18,10 @@ class WorkflowExecutor:
         }
 
         self.runtime = NodeRuntime()
+        self.retry_handler = RetryHandler()
+        self.run = WorkflowRun(
+        workflow.name
+    )
 
         self.node_outputs = {}
 
@@ -142,23 +148,49 @@ class WorkflowExecutor:
             f"Input: {input_data}"
         )
 
-        result = await self.runtime.execute(
-            node,
-            input_data
+        async def run_node():
+
+            return await self.runtime.execute(
+                node,
+                input_data
+            )
+
+        execution = await self.retry_handler.execute_with_retry(
+            run_node,
+            node.retry_count
         )
 
-        self.node_outputs[node_id] = result
+        if execution["success"]:
+
+            result = execution["result"]
+
+            self.node_outputs[node_id] = result
+
+            print(
+                f"Completed node: {node.name}"
+            )
+
+            return {
+                "node_id": node.id,
+                "node_name": node.name,
+                "input": input_data,
+                "output": result,
+                "status": "completed",
+                "attempts": execution["attempts"],
+            }
 
         print(
-            f"Completed node: {node.name}"
+            f"Node failed permanently: {node.name}"
         )
 
         return {
             "node_id": node.id,
             "node_name": node.name,
             "input": input_data,
-            "output": result,
-            "status": "completed",
+            "output": None,
+            "status": "failed",
+            "attempts": execution["attempts"],
+            "error": execution["error"],
         }
 
     async def execute(self):

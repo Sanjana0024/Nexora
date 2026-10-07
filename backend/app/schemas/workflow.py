@@ -8,6 +8,7 @@ class WorkflowNode(BaseModel):
     type: str
     name: str
     config: dict[str, Any] = Field(default_factory=dict)
+    retry_count: int = Field(default=0, ge=0, le=5)
 
 
 class WorkflowEdge(BaseModel):

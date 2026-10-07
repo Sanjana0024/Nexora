@@ -104,3 +104,16 @@ class NodeRuntime:
             "actual": actual,
             "result": result,
         }
+    async def execute_action(self, node, input_data):
+
+        if node.config.get("simulate_failure"):
+
+            raise ValueError(
+                "Simulated action failure"
+            )
+
+        return {
+            "type": "action",
+            "message": f"Action '{node.name}' executed",
+            "input": input_data,
+        }
