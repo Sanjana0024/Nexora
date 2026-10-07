@@ -47,15 +47,60 @@ class NodeRuntime:
 
     async def execute_condition(self, node, input_data):
 
-        expected_value = node.config.get("value")
+        field = node.config.get("field")
+        operator = node.config.get("operator")
+        expected = node.config.get("value")
 
-        actual_value = input_data
+        actual = None
 
-        result = actual_value == expected_value
+        if isinstance(input_data, dict):
+
+            for parent_output in input_data.values():
+
+                if not isinstance(parent_output, dict):
+                    continue
+
+                output = parent_output.get("output")
+
+                if isinstance(output, dict):
+                    actual = output.get(field)
+
+                    if actual is not None:
+                        break
+
+        if actual is None:
+            raise ValueError(
+                f"Condition field '{field}' was not found"
+            )
+
+        if operator == "==":
+            result = actual == expected
+
+        elif operator == "!=":
+            result = actual != expected
+
+        elif operator == ">":
+            result = actual > expected
+
+        elif operator == ">=":
+            result = actual >= expected
+
+        elif operator == "<":
+            result = actual < expected
+
+        elif operator == "<=":
+            result = actual <= expected
+
+        else:
+            raise ValueError(
+                f"Unsupported operator: {operator}"
+            )
 
         return {
             "type": "condition",
+            "field": field,
+            "operator": operator,
+            "expected": expected,
+            "actual": actual,
             "result": result,
-            "expected": expected_value,
-            "actual": actual_value,
         }
