@@ -197,62 +197,87 @@ class WorkflowExecutor:
 
         results = []
 
-        for level in self.execution_levels:
+        try:
 
-            runnable_nodes = []
+            for level in self.execution_levels:
 
-            for node_id in level:
+                runnable_nodes = []
 
-                if node_id in self.skipped_nodes:
+                for node_id in level:
 
+                    if node_id in self.skipped_nodes:
+                        continue
+
+                    runnable_nodes.append(node_id)
+
+                if not runnable_nodes:
                     continue
 
-                runnable_nodes.append(
-                    node_id
+                level_results = await asyncio.gather(
+                    *[
+                        self.execute_node(node_id)
+                        for node_id in runnable_nodes
+                    ]
                 )
 
-            if not runnable_nodes:
+                results.extend(level_results)
 
-                continue
+                self.run.node_results.extend(
+                    level_results
+                )
 
-            level_results = await asyncio.gather(
-                *[
-                    self.execute_node(node_id)
-                    for node_id in runnable_nodes
-                ]
-            )
+                for result in level_results:
 
-            results.extend(
-                level_results
-            )
+                    node_id = result["node_id"]
 
-            # Determine branches after execution
-            for result in level_results:
+                    node_output = result["output"]
 
-                node_id = result["node_id"]
+                    if result["status"] == "failed":
 
-                node_output = result["output"]
+                        self.run.mark_failed()
 
-                active_targets = (
-                    self.get_active_targets(
-                        node_id,
-                        node_output
+                        return {
+                            "run_id": self.run.run_id,
+                            "workflow": self.run.workflow_name,
+                            "status": self.run.status,
+                            "results": results,
+                        }
+
+                    active_targets = (
+                        self.get_active_targets(
+                            node_id,
+                            node_output
+                        )
                     )
-                )
 
-                skipped_targets = (
-                    self.get_skipped_targets(
-                        node_id,
-                        node_output
+                    skipped_targets = (
+                        self.get_skipped_targets(
+                            node_id,
+                            node_output
+                        )
                     )
-                )
 
-                self.active_nodes.update(
-                    active_targets
-                )
+                    self.active_nodes.update(
+                        active_targets
+                    )
 
-                self.skipped_nodes.update(
-                    skipped_targets
-                )
+                    self.skipped_nodes.update(
+                        skipped_targets
+                    )
 
-        return results
+            self.run.mark_success()
+
+            return {
+                "run_id": self.run.run_id,
+                "workflow": self.run.workflow_name,
+                "status": self.run.status,
+                "started_at": self.run.started_at,
+                "completed_at": self.run.completed_at,
+                "results": results,
+            }
+
+        except Exception:
+
+            self.run.mark_failed()
+
+            raise
