@@ -1,4 +1,8 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import text
+from sqlalchemy.orm import Session
+
+from app.core.database import get_db
 
 from app.schemas.workflow import WorkflowCreate
 
@@ -51,4 +55,17 @@ async def create_workflow(workflow: WorkflowCreate):
         "execution_levels": execution_levels,
         "execution_results": execution_results,
         "workflow": workflow,
+    }
+@router.get("/database-test")
+def database_test(db: Session = Depends(get_db)):
+
+    result = db.execute(
+        text("SELECT current_database();")
+    )
+
+    database_name = result.scalar()
+
+    return {
+        "status": "connected",
+        "database": database_name,
     }
