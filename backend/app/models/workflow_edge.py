@@ -1,15 +1,14 @@
-from datetime import datetime
 from uuid import uuid4
 
-from sqlalchemy import DateTime, ForeignKey, String
+from sqlalchemy import ForeignKey, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.base import Base
 
 
-class WorkflowRun(Base):
+class WorkflowEdge(Base):
 
-    __tablename__ = "workflow_runs"
+    __tablename__ = "workflow_edges"
 
     id: Mapped[str] = mapped_column(
         String(36),
@@ -22,18 +21,17 @@ class WorkflowRun(Base):
         nullable=False,
     )
 
-    status: Mapped[str] = mapped_column(
+    source_node_id: Mapped[str] = mapped_column(
+        ForeignKey("workflow_nodes.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    target_node_id: Mapped[str] = mapped_column(
+        ForeignKey("workflow_nodes.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    condition: Mapped[str | None] = mapped_column(
         String(20),
-        default="RUNNING",
-        nullable=False,
-    )
-
-    started_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-    )
-
-    completed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
         nullable=True,
     )

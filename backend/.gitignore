@@ -37,3 +37,9 @@ out/
 # Build
 dist/
 build/
+
+venv/
+.env
+__pycache__/
+*.pyc
+.vscode/
