@@ -6,7 +6,7 @@ from app.models import (
     WorkflowNode,
     WorkflowEdge,
     WorkflowRun,
-    NodeRun,init
+    NodeRun,
 )
 
 
