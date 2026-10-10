@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 
 from app.models.workflow_run import WorkflowRun
 from app.models.node_run import NodeRun
+from app.services.ai_planner import plan_workflow
 
 
 router = APIRouter(
@@ -504,3 +505,38 @@ def get_workflow_run_details(
             ],
         },
     }
+
+@router.post("/plan")
+def plan_workflow_endpoint(
+    request: dict,
+):
+    user_request = request.get("prompt", "").strip()
+
+    if not user_request:
+        raise HTTPException(
+            status_code=400,
+            detail="Please provide a workflow prompt.",
+        )
+
+    if len(user_request) > 5000:
+        raise HTTPException(
+            status_code=400,
+            detail="Prompt must be 5000 characters or fewer.",
+        )
+
+    try:
+        workflow = plan_workflow(user_request)
+
+        return {
+            "message": "Workflow planned successfully",
+            "workflow": workflow.model_dump(),
+        }
+
+    except Exception as error:
+        # Keep internal API keys and provider details out of the response.
+        print(f"Workflow planning failed: {error}")
+
+        raise HTTPException(
+            status_code=502,
+            detail="AI workflow planning failed. Check the backend terminal.",
+        ) from error
