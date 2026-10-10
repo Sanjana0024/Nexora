@@ -540,3 +540,81 @@ def plan_workflow_endpoint(
             status_code=502,
             detail="AI workflow planning failed. Check the backend terminal.",
         ) from error
+
+@router.post("/plan-and-save")
+def plan_and_save_workflow(
+    request: dict,
+    db: Session = Depends(get_db),
+):
+    user_request = request.get("prompt", "").strip()
+
+    if not user_request:
+        raise HTTPException(
+            status_code=400,
+            detail="Please provide a workflow prompt.",
+        )
+
+    if len(user_request) > 5000:
+        raise HTTPException(
+            status_code=400,
+            detail="Prompt must be 5000 characters or fewer.",
+        )
+
+    try:
+        # 1. Generate and validate the workflow with Gemini.
+        workflow = plan_workflow(user_request)
+
+        # 2. Save the generated workflow and its nodes.
+        db_workflow = Workflow(
+            name=workflow.name,
+            description=workflow.description,
+        )
+        db.add(db_workflow)
+        db.flush()
+
+        node_id_map = {}
+
+        for node in workflow.nodes:
+            db_node = WorkflowNode(
+                workflow_id=db_workflow.id,
+                node_key=node.id,
+                type=node.type,
+                name=node.name,
+                config=node.config,
+                retry_count=node.retry_count,
+            )
+            db.add(db_node)
+            node_id_map[node.id] = db_node
+
+        db.flush()
+
+        # 3. Save the connections between nodes.
+        for edge in workflow.edges:
+            db_edge = WorkflowEdge(
+                workflow_id=db_workflow.id,
+                source_node_id=node_id_map[edge.source].id,
+                target_node_id=node_id_map[edge.target].id,
+                condition=edge.condition,
+            )
+            db.add(db_edge)
+
+        db.commit()
+        db.refresh(db_workflow)
+
+        return {
+            "message": "AI workflow generated and saved successfully",
+            "workflow_id": db_workflow.id,
+            "name": db_workflow.name,
+            "node_count": len(workflow.nodes),
+            "edge_count": len(workflow.edges),
+            "workflow": workflow.model_dump(),
+        }
+
+    except Exception as error:
+        db.rollback()
+        print(f"Plan-and-save failed: {error}")
+
+        raise HTTPException(
+            status_code=502,
+            detail="Workflow generation or saving failed. Check the backend terminal.",
+        ) from error
