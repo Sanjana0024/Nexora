@@ -356,3 +356,151 @@ async def execute_saved_workflow(
             status_code=500,
             detail="Workflow execution or result persistence failed",
         ) from error
+
+@router.get("/{workflow_id}/runs")
+def get_workflow_runs(
+    workflow_id: str,
+    db: Session = Depends(get_db),
+):
+    # Confirm that the workflow exists.
+    db_workflow = (
+        db.query(Workflow)
+        .filter(Workflow.id == workflow_id)
+        .first()
+    )
+
+    if db_workflow is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Workflow not found",
+        )
+
+    # Fetch previous runs, newest first.
+    runs = (
+        db.query(WorkflowRun)
+        .filter(WorkflowRun.workflow_id == workflow_id)
+        .order_by(WorkflowRun.started_at.desc())
+        .all()
+    )
+
+    return {
+        "workflow_id": workflow_id,
+        "total_runs": len(runs),
+        "runs": [
+            {
+                "run_id": run.id,
+                "status": run.status,
+                "started_at": (
+                    run.started_at.isoformat()
+                    if run.started_at else None
+                ),
+                "completed_at": (
+                    run.completed_at.isoformat()
+                    if run.completed_at else None
+                ),
+            }
+            for run in runs
+        ],
+    }
+
+
+@router.get("/{workflow_id}/runs/{run_id}")
+def get_workflow_run_details(
+    workflow_id: str,
+    run_id: str,
+    db: Session = Depends(get_db),
+):
+    # Confirm that the workflow exists.
+    db_workflow = (
+        db.query(Workflow)
+        .filter(Workflow.id == workflow_id)
+        .first()
+    )
+
+    if db_workflow is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Workflow not found",
+        )
+
+    # Find this run under the specified workflow.
+    db_run = (
+        db.query(WorkflowRun)
+        .filter(
+            WorkflowRun.id == run_id,
+            WorkflowRun.workflow_id == workflow_id,
+        )
+        .first()
+    )
+
+    if db_run is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Workflow run not found",
+        )
+
+    # Get all node results for this run.
+    node_runs = (
+        db.query(NodeRun)
+        .filter(NodeRun.workflow_run_id == db_run.id)
+        .order_by(NodeRun.started_at.asc())
+        .all()
+    )
+
+    # Fetch node names and readable node keys.
+    node_ids = [item.node_id for item in node_runs]
+
+    db_nodes = (
+        db.query(WorkflowNode)
+        .filter(WorkflowNode.id.in_(node_ids))
+        .all()
+        if node_ids else []
+    )
+
+    nodes_by_id = {
+        node.id: node for node in db_nodes
+    }
+
+    return {
+        "workflow_id": workflow_id,
+        "workflow_name": db_workflow.name,
+        "run": {
+            "run_id": db_run.id,
+            "status": db_run.status,
+            "started_at": (
+                db_run.started_at.isoformat()
+                if db_run.started_at else None
+            ),
+            "completed_at": (
+                db_run.completed_at.isoformat()
+                if db_run.completed_at else None
+            ),
+            "nodes": [
+                {
+                    "node_id": item.node_id,
+                    "node_key": (
+                        nodes_by_id[item.node_id].node_key
+                        if item.node_id in nodes_by_id else None
+                    ),
+                    "node_name": (
+                        nodes_by_id[item.node_id].name
+                        if item.node_id in nodes_by_id else None
+                    ),
+                    "status": item.status,
+                    "attempts": item.attempts,
+                    "input": item.input_data,
+                    "output": item.output_data,
+                    "error": item.error,
+                    "started_at": (
+                        item.started_at.isoformat()
+                        if item.started_at else None
+                    ),
+                    "completed_at": (
+                        item.completed_at.isoformat()
+                        if item.completed_at else None
+                    ),
+                }
+                for item in node_runs
+            ],
+        },
+    }
