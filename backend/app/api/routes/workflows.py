@@ -19,6 +19,10 @@ from app.schemas.workflow import (
 
 from app.services.dag_engine import DAGEngine
 from app.services.workflow_executor import WorkflowExecutor
+from datetime import datetime, timezone
+
+from app.models.workflow_run import WorkflowRun
+from app.models.node_run import NodeRun
 
 
 router = APIRouter(
@@ -186,12 +190,12 @@ def get_workflow(
         ],
     }
 
+
 @router.post("/{workflow_id}/runs")
 async def execute_saved_workflow(
     workflow_id: str,
     db: Session = Depends(get_db),
 ):
-    # 1. Find the saved workflow
     db_workflow = (
         db.query(Workflow)
         .filter(Workflow.id == workflow_id)
@@ -204,78 +208,151 @@ async def execute_saved_workflow(
             detail="Workflow not found",
         )
 
-    # 2. Load its nodes and edges from PostgreSQL
     db_nodes = (
         db.query(WorkflowNode)
-        .filter(
-            WorkflowNode.workflow_id == db_workflow.id
-        )
+        .filter(WorkflowNode.workflow_id == db_workflow.id)
         .all()
     )
 
     db_edges = (
         db.query(WorkflowEdge)
-        .filter(
-            WorkflowEdge.workflow_id == db_workflow.id
-        )
+        .filter(WorkflowEdge.workflow_id == db_workflow.id)
         .all()
     )
 
-    # Map database node IDs to the original workflow node keys
-    nodes_by_db_id = {
-        node.id: node for node in db_nodes
-    }
+    nodes_by_db_id = {node.id: node for node in db_nodes}
 
-    # 3. Reconstruct the workflow in the format
-    #    expected by the existing engine
-    workflow_data = WorkflowCreate(
-        name=db_workflow.name,
-        description=db_workflow.description,
-        nodes=[
-            WorkflowNodeSchema(
-                id=node.node_key,
-                type=node.type,
-                name=node.name,
-                config=node.config,
-                retry_count=node.retry_count,
-            )
-            for node in db_nodes
-        ],
-        edges=[
-            WorkflowEdgeSchema(
-                source=nodes_by_db_id[edge.source_node_id].node_key,
-                target=nodes_by_db_id[edge.target_node_id].node_key,
-                condition=edge.condition,
-            )
-            for edge in db_edges
-        ],
-    )
-
-    # 4. Validate and rebuild the DAG
     try:
+        workflow_data = WorkflowCreate(
+            name=db_workflow.name,
+            description=db_workflow.description,
+            nodes=[
+                WorkflowNodeSchema(
+                    id=node.node_key,
+                    type=node.type,
+                    name=node.name,
+                    config=node.config,
+                    retry_count=node.retry_count,
+                )
+                for node in db_nodes
+            ],
+            edges=[
+                WorkflowEdgeSchema(
+                    source=nodes_by_db_id[edge.source_node_id].node_key,
+                    target=nodes_by_db_id[edge.target_node_id].node_key,
+                    condition=edge.condition,
+                )
+                for edge in db_edges
+            ],
+        )
+
         validate_workflow(workflow_data)
 
         dag = DAGEngine(workflow_data)
         execution_levels = dag.get_execution_levels()
 
-    except (WorkflowValidationError, ValueError) as error:
+    except (WorkflowValidationError, ValueError, KeyError) as error:
         raise HTTPException(
             status_code=400,
             detail=str(error),
         ) from error
 
-    # 5. Execute the workflow
-    executor = WorkflowExecutor(
-        workflow_data,
-        execution_levels,
+    # 1. Create a persistent run record before execution.
+    started_at = datetime.now(timezone.utc)
+
+    db_run = WorkflowRun(
+        workflow_id=db_workflow.id,
+        status="RUNNING",
+        started_at=started_at,
+        completed_at=None,
     )
 
-    execution_result = await executor.execute()
+    try:
+        db.add(db_run)
+        db.commit()
+        db.refresh(db_run)
+    except Exception as error:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Could not create workflow run record",
+        ) from error
 
-    # 6. Return the result
-    return {
-        "message": "Workflow execution finished",
-        "workflow_id": db_workflow.id,
-        "execution_levels": execution_levels,
-        "execution": execution_result,
+    # Map workflow node keys to their database UUIDs.
+    node_key_to_db_id = {
+        node.node_key: node.id for node in db_nodes
     }
+
+    # 2. Execute the workflow.
+    executor = WorkflowExecutor(workflow_data, execution_levels)
+
+    try:
+        execution_result = await executor.execute()
+
+        completed_at = datetime.now(timezone.utc)
+        final_status = execution_result.get("status", "FAILED")
+
+        # 3. Save the final status and completion time.
+        db_run.status = final_status
+        db_run.completed_at = completed_at
+
+        # 4. Persist every node result returned by the executor.
+        for result in execution_result.get("results", []):
+            node_key = result["node_id"]
+            database_node_id = node_key_to_db_id.get(node_key)
+
+            if database_node_id is None:
+                raise ValueError(
+                    f"No database node found for '{node_key}'"
+                )
+
+            db_node_run = NodeRun(
+                workflow_run_id=db_run.id,
+                node_id=database_node_id,
+                status=result.get("status", "completed"),
+                input_data=result.get("input"),
+                output_data=result.get("output"),
+                error=result.get("error"),
+                attempts=result.get("attempts", 1),
+                started_at=started_at,
+                completed_at=completed_at,
+            )
+
+            db.add(db_node_run)
+
+        db.commit()
+        db.refresh(db_run)
+
+        # Use the persistent database run ID in the response.
+        execution_result["run_id"] = db_run.id
+        execution_result["status"] = db_run.status
+        execution_result["started_at"] = db_run.started_at.isoformat()
+        execution_result["completed_at"] = (
+            db_run.completed_at.isoformat()
+            if db_run.completed_at
+            else None
+        )
+
+        return {
+            "message": "Workflow execution finished",
+            "workflow_id": db_workflow.id,
+            "execution_levels": execution_levels,
+            "execution": execution_result,
+        }
+
+    except Exception as error:
+        db.rollback()
+
+        # Keep a failed run in the database for later inspection.
+        db_run.status = "FAILED"
+        db_run.completed_at = datetime.now(timezone.utc)
+
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+
+        raise HTTPException(
+            status_code=500,
+            detail="Workflow execution or result persistence failed",
+        ) from error

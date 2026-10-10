@@ -2,7 +2,7 @@ import asyncio
 
 from app.services.node_runtime import NodeRuntime
 from app.services.retry_handler import RetryHandler
-from app.models.workflow_run import WorkflowRun
+from app.services.workflow_run_state import WorkflowRunState
 
 
 class WorkflowExecutor:
@@ -19,9 +19,7 @@ class WorkflowExecutor:
 
         self.runtime = NodeRuntime()
         self.retry_handler = RetryHandler()
-        self.run = WorkflowRun(
-        workflow.name
-    )
+        self.run = WorkflowRunState(workflow.name)
 
         self.node_outputs = {}
 

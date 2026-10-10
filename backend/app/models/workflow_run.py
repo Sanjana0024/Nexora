@@ -2,7 +2,7 @@ from datetime import datetime
 from uuid import uuid4
 
 from sqlalchemy import DateTime, ForeignKey, String
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.base import Base
 
@@ -37,3 +37,7 @@ class WorkflowRun(Base):
         DateTime(timezone=True),
         nullable=True,
     )
+    node_runs: Mapped[list["NodeRun"]] = relationship(
+    back_populates="workflow_run",
+    cascade="all, delete-orphan",
+)

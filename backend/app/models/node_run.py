@@ -3,7 +3,7 @@ from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import DateTime, ForeignKey, Integer, JSON, String, Text
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.base import Base
 
@@ -63,3 +63,6 @@ class NodeRun(Base):
         DateTime(timezone=True),
         nullable=True,
     )
+    workflow_run: Mapped["WorkflowRun"] = relationship(
+    back_populates="node_runs"
+)
