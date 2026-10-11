@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
+from typing import Any
 
 from app.core.database import get_db
 from app.models.workflow import Workflow
@@ -505,6 +506,96 @@ def get_workflow_run_details(
             ],
         },
     }
+
+@router.patch("/{workflow_id}/nodes/{node_id}")
+def update_workflow_node(
+    workflow_id: str,
+    node_id: str,
+    request: dict[str, Any],
+    db: Session = Depends(get_db),
+):
+    # Find the workflow.
+    workflow = (
+        db.query(Workflow)
+        .filter(Workflow.id == workflow_id)
+        .first()
+    )
+
+    if workflow is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Workflow not found",
+        )
+
+    # Find the requested node by its readable node key.
+    node = (
+        db.query(WorkflowNode)
+        .filter(
+            WorkflowNode.workflow_id == workflow.id,
+            WorkflowNode.node_key == node_id,
+        )
+        .first()
+    )
+
+    if node is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Workflow node not found",
+        )
+
+    # Only allow configuration updates through this endpoint.
+    if not request or "config" not in request:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide a non-empty request containing 'config'.",
+        )
+
+    new_config = request["config"]
+
+    if not isinstance(new_config, dict):
+        raise HTTPException(
+            status_code=400,
+            detail="'config' must be a JSON object.",
+        )
+
+    # Merge settings instead of accidentally deleting existing ones.
+    updated_config = dict(node.config or {})
+    updated_config.update(new_config)
+
+    # Validate score settings for AI lead-scoring nodes.
+    if node.type == "ai" and updated_config.get("task") == "lead_scoring":
+        test_score = updated_config.get("test_score")
+
+        if test_score is not None:
+            if (
+                isinstance(test_score, bool)
+                or not isinstance(test_score, (int, float))
+                or not 0 <= test_score <= 100
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail="'test_score' must be a number from 0 to 100.",
+                )
+
+    try:
+        node.config = updated_config
+        db.commit()
+        db.refresh(node)
+
+        return {
+            "message": "Workflow node configuration updated successfully",
+            "workflow_id": workflow.id,
+            "node_id": node.node_key,
+            "node_name": node.name,
+            "config": node.config,
+        }
+
+    except Exception as error:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Could not update workflow node configuration.",
+        ) from error
 
 @router.post("/plan")
 def plan_workflow_endpoint(
