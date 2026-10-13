@@ -4,8 +4,10 @@ import ipaddress
 import json
 import os
 import socket
+from email.message import EmailMessage
 from urllib.parse import urlparse
 
+import aiosmtplib
 import httpx
 from dotenv import load_dotenv
 from google import genai
@@ -14,6 +16,10 @@ load_dotenv()
 
 
 class NodeRuntime:
+
+    # --------------------------------------------------
+    # MAIN NODE DISPATCHER
+    # --------------------------------------------------
 
     async def execute(self, node, input_data=None):
         if node.type == "trigger":
@@ -51,7 +57,7 @@ class NodeRuntime:
         task = config.get("task", "general")
         output_field = config.get("output_field", "result")
 
-        # Use configured mock output for predictable testing.
+        # Explicit mock output for predictable testing.
         if "mock_output" in config:
             result = config["mock_output"]
             simulated = True
@@ -90,6 +96,8 @@ For lead_scoring, return a score from 0 to 100 and an intent.
 Return JSON only, with no Markdown.
 """
 
+                # Run the synchronous Gemini SDK call without blocking
+                # the asynchronous event loop.
                 response = await asyncio.to_thread(
                     client.models.generate_content,
                     model=model,
@@ -162,8 +170,11 @@ Return JSON only, with no Markdown.
 
     async def _validate_webhook_url(self, url):
         """
-        Allow HTTPS webhook URLs that resolve to public IP addresses.
-        Reject local/private destinations and non-default ports.
+        Basic SSRF safeguards:
+        - HTTPS only
+        - Default HTTPS port only
+        - Reject local and non-public IP destinations
+        - Reject URLs containing credentials or fragments
         """
 
         if not isinstance(url, str) or not url.strip():
@@ -199,12 +210,12 @@ Return JSON only, with no Markdown.
                 "Only the default HTTPS port is allowed"
             )
 
-        # Reject private, loopback, reserved and other non-public IPs.
+        # If the hostname itself is an IP address, validate it directly.
         try:
             ip = ipaddress.ip_address(hostname)
 
         except ValueError:
-            # Hostname is not a literal IP; resolve its addresses.
+            # Otherwise resolve the hostname and check every address.
             try:
                 records = await asyncio.to_thread(
                     socket.getaddrinfo,
@@ -249,7 +260,7 @@ Return JSON only, with no Markdown.
         return url
 
     # --------------------------------------------------
-    # ACTION NODE - WEBHOOK + SIMULATED ACTIONS
+    # ACTION NODE - WEBHOOK, EMAIL, SIMULATED ACTIONS
     # --------------------------------------------------
 
     async def execute_action(self, node, input_data=None):
@@ -263,16 +274,16 @@ Return JSON only, with no Markdown.
             "unspecified",
         )
 
-        # REAL WEBHOOK REQUEST
+        # --------------------------------------------------
+        # REAL WEBHOOK ACTION
+        # --------------------------------------------------
+
         if action_type == "webhook":
             url = await self._validate_webhook_url(
                 config.get("url")
             )
 
-            # Send the configured payload, or parent-node data
-            # when no explicit payload has been configured.
             payload = config.get("payload", input_data)
-
             timeout = httpx.Timeout(10.0)
 
             try:
@@ -306,15 +317,97 @@ Return JSON only, with no Markdown.
 
             return {
                 "type": "action",
-                "message": (
-                    "Webhook request completed successfully"
-                ),
+                "message": "Webhook request completed successfully",
                 "action_type": "webhook",
                 "simulated": False,
                 "status_code": response.status_code,
             }
 
-        # OTHER ACTIONS ARE STILL SIMULATED
+        # --------------------------------------------------
+        # REAL EMAIL ACTION
+        # --------------------------------------------------
+
+        if action_type == "email":
+            smtp_host = os.getenv("SMTP_HOST")
+            smtp_username = os.getenv("SMTP_USERNAME")
+            smtp_password = os.getenv("SMTP_PASSWORD")
+            from_email = os.getenv("SMTP_FROM_EMAIL")
+
+            try:
+                smtp_port = int(os.getenv("SMTP_PORT", "587"))
+            except ValueError as error:
+                raise ValueError(
+                    "SMTP_PORT must be a valid integer"
+                ) from error
+
+            if not all([
+                smtp_host,
+                smtp_username,
+                smtp_password,
+                from_email,
+            ]):
+                raise ValueError(
+                    "Email SMTP settings are missing from .env"
+                )
+
+            recipient = config.get("to")
+            subject = config.get("subject")
+            body = config.get("body")
+
+            if (
+                not isinstance(recipient, str)
+                or not recipient.strip()
+                or "@" not in recipient
+            ):
+                raise ValueError(
+                    "A valid email recipient is required"
+                )
+
+            if not isinstance(subject, str) or not subject.strip():
+                raise ValueError("Email subject is required")
+
+            if not isinstance(body, str) or not body.strip():
+                raise ValueError("Email body is required")
+
+            message = EmailMessage()
+            message["From"] = from_email
+            message["To"] = recipient
+            message["Subject"] = subject
+            message.set_content(body)
+
+            try:
+                await aiosmtplib.send(
+                    message,
+                    hostname=smtp_host,
+                    port=smtp_port,
+                    username=smtp_username,
+                    password=smtp_password,
+                    start_tls=True,
+                    timeout=10,
+                )
+
+            except (
+                    aiosmtplib.SMTPException,
+                    OSError,
+                    TimeoutError,
+                ) as error:
+                    print(f"SMTP error type: {type(error).__name__}")
+                    print(f"SMTP error details: {error!r}")
+                    raise ValueError(
+                        f"Email sending failed: {type(error).__name__}: {error}"
+                    ) from error
+
+            return {
+                "type": "action",
+                "message": "Email accepted by the SMTP server",
+                "action_type": "email",
+                "simulated": False,
+            }
+
+        # --------------------------------------------------
+        # OTHER ACTIONS - SIMULATED FOR NOW
+        # --------------------------------------------------
+
         return {
             "type": "action",
             "message": (
@@ -346,10 +439,7 @@ Return JSON only, with no Markdown.
 
                 output = parent_output.get("output")
 
-                if (
-                    isinstance(output, dict)
-                    and field in output
-                ):
+                if isinstance(output, dict) and field in output:
                     actual = output[field]
                     break
 
@@ -374,10 +464,7 @@ Return JSON only, with no Markdown.
             )
 
         try:
-            result = comparisons[operator](
-                actual,
-                expected,
-            )
+            result = comparisons[operator](actual, expected)
         except TypeError as error:
             raise ValueError(
                 "Condition values have incompatible types"
