@@ -8,7 +8,12 @@ from app.services.workflow_run_state import WorkflowRunState
 
 class WorkflowExecutor:
 
-    def __init__(self, workflow, execution_levels):
+    def __init__(
+    self,
+    workflow,
+    execution_levels,
+    initial_input=None,
+):
         self.workflow = workflow
         self.execution_levels = execution_levels
 
@@ -22,6 +27,7 @@ class WorkflowExecutor:
         self.run = WorkflowRunState(workflow.name)
 
         self.node_outputs = {}
+        self.initial_input = initial_input or {}
 
         self.dependencies = {
             node.id: []
@@ -42,7 +48,7 @@ class WorkflowExecutor:
         parent_nodes = self.dependencies[node_id]
 
         if not parent_nodes:
-            return None
+            return self.initial_input or None
 
         return {
             parent_id: self.node_outputs[parent_id]

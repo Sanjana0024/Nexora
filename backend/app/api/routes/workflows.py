@@ -1,29 +1,31 @@
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
+
+from datetime import datetime, timezone
 from typing import Any
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
+from sqlalchemy import text
+from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.models.workflow import Workflow
 from app.models.workflow_node import WorkflowNode
 from app.models.workflow_edge import WorkflowEdge
-from app.schemas.workflow import WorkflowCreate
+from app.models.workflow_run import WorkflowRun
+from app.models.node_run import NodeRun
 
-from app.services.workflow_validator import (
-    validate_workflow,
-    WorkflowValidationError,
-)
 from app.schemas.workflow import (
     WorkflowCreate,
     WorkflowNode as WorkflowNodeSchema,
     WorkflowEdge as WorkflowEdgeSchema,
 )
 
+from app.services.workflow_validator import (
+    validate_workflow,
+    WorkflowValidationError,
+)
 from app.services.dag_engine import DAGEngine
 from app.services.workflow_executor import WorkflowExecutor
-from datetime import datetime, timezone
-
-from app.models.workflow_run import WorkflowRun
-from app.models.node_run import NodeRun
 from app.services.ai_planner import plan_workflow
 
 
@@ -33,17 +35,26 @@ router = APIRouter(
 )
 
 
+# --------------------------------------------------
+# REQUEST MODELS
+# --------------------------------------------------
+
+class WorkflowRunRequest(BaseModel):
+    input_data: dict[str, Any] = Field(default_factory=dict)
+
+
+# --------------------------------------------------
+# CREATE WORKFLOW
+# --------------------------------------------------
+
 @router.post("/")
 def create_workflow(
     workflow: WorkflowCreate,
     db: Session = Depends(get_db),
 ):
-
     try:
-        # 1. Validate workflow
         validate_workflow(workflow)
 
-        # 2. Create workflow
         db_workflow = Workflow(
             name=workflow.name,
             description=workflow.description,
@@ -52,11 +63,9 @@ def create_workflow(
         db.add(db_workflow)
         db.flush()
 
-        # 3. Create nodes
         node_id_map = {}
 
         for node in workflow.nodes:
-
             db_node = WorkflowNode(
                 workflow_id=db_workflow.id,
                 node_key=node.id,
@@ -67,14 +76,11 @@ def create_workflow(
             )
 
             db.add(db_node)
-
             node_id_map[node.id] = db_node
 
         db.flush()
 
-        # 4. Create edges
         for edge in workflow.edges:
-
             db_edge = WorkflowEdge(
                 workflow_id=db_workflow.id,
                 source_node_id=node_id_map[edge.source].id,
@@ -84,7 +90,6 @@ def create_workflow(
 
             db.add(db_edge)
 
-        # 5. Save everything
         db.commit()
         db.refresh(db_workflow)
 
@@ -96,41 +101,41 @@ def create_workflow(
         }
 
     except WorkflowValidationError as error:
-
         db.rollback()
-
         raise HTTPException(
             status_code=400,
             detail=str(error),
-        )
+        ) from error
 
     except Exception as error:
-
         db.rollback()
-
         raise HTTPException(
             status_code=500,
-            detail=str(error),
-        )
+            detail="Could not create workflow",
+        ) from error
 
+
+# --------------------------------------------------
+# DATABASE TEST
+# --------------------------------------------------
 
 @router.get("/database-test")
 def database_test(
     db: Session = Depends(get_db),
 ):
-
-    from sqlalchemy import text
-
     result = db.execute(
         text("SELECT current_database();")
     )
 
-    database_name = result.scalar()
-
     return {
         "status": "connected",
-        "database": database_name,
+        "database": result.scalar(),
     }
+
+
+# --------------------------------------------------
+# GET WORKFLOW
+# --------------------------------------------------
 
 @router.get("/{workflow_id}")
 def get_workflow(
@@ -143,7 +148,7 @@ def get_workflow(
         .first()
     )
 
-    if not workflow:
+    if workflow is None:
         raise HTTPException(
             status_code=404,
             detail="Workflow not found",
@@ -193,9 +198,14 @@ def get_workflow(
     }
 
 
+# --------------------------------------------------
+# EXECUTE SAVED WORKFLOW WITH INPUT DATA
+# --------------------------------------------------
+
 @router.post("/{workflow_id}/runs")
 async def execute_saved_workflow(
     workflow_id: str,
+    request: WorkflowRunRequest | None = None,
     db: Session = Depends(get_db),
 ):
     db_workflow = (
@@ -212,17 +222,24 @@ async def execute_saved_workflow(
 
     db_nodes = (
         db.query(WorkflowNode)
-        .filter(WorkflowNode.workflow_id == db_workflow.id)
+        .filter(
+            WorkflowNode.workflow_id == db_workflow.id
+        )
         .all()
     )
 
     db_edges = (
         db.query(WorkflowEdge)
-        .filter(WorkflowEdge.workflow_id == db_workflow.id)
+        .filter(
+            WorkflowEdge.workflow_id == db_workflow.id
+        )
         .all()
     )
 
-    nodes_by_db_id = {node.id: node for node in db_nodes}
+    nodes_by_db_id = {
+        node.id: node
+        for node in db_nodes
+    }
 
     try:
         workflow_data = WorkflowCreate(
@@ -240,8 +257,12 @@ async def execute_saved_workflow(
             ],
             edges=[
                 WorkflowEdgeSchema(
-                    source=nodes_by_db_id[edge.source_node_id].node_key,
-                    target=nodes_by_db_id[edge.target_node_id].node_key,
+                    source=nodes_by_db_id[
+                        edge.source_node_id
+                    ].node_key,
+                    target=nodes_by_db_id[
+                        edge.target_node_id
+                    ].node_key,
                     condition=edge.condition,
                 )
                 for edge in db_edges
@@ -253,13 +274,24 @@ async def execute_saved_workflow(
         dag = DAGEngine(workflow_data)
         execution_levels = dag.get_execution_levels()
 
-    except (WorkflowValidationError, ValueError, KeyError) as error:
+    except (
+        WorkflowValidationError,
+        ValueError,
+        KeyError,
+    ) as error:
         raise HTTPException(
             status_code=400,
             detail=str(error),
         ) from error
 
-    # 1. Create a persistent run record before execution.
+    # Pass the incoming lead data into the workflow.
+    initial_input = (
+        request.input_data
+        if request is not None
+        else {}
+    )
+
+    # Create a persistent run record.
     started_at = datetime.now(timezone.utc)
 
     db_run = WorkflowRun(
@@ -273,6 +305,7 @@ async def execute_saved_workflow(
         db.add(db_run)
         db.commit()
         db.refresh(db_run)
+
     except Exception as error:
         db.rollback()
         raise HTTPException(
@@ -280,28 +313,38 @@ async def execute_saved_workflow(
             detail="Could not create workflow run record",
         ) from error
 
-    # Map workflow node keys to their database UUIDs.
     node_key_to_db_id = {
-        node.node_key: node.id for node in db_nodes
+        node.node_key: node.id
+        for node in db_nodes
     }
 
-    # 2. Execute the workflow.
-    executor = WorkflowExecutor(workflow_data, execution_levels)
+    # IMPORTANT: the executor must accept initial_input.
+    executor = WorkflowExecutor(
+        workflow_data,
+        execution_levels,
+        initial_input=initial_input,
+    )
 
     try:
         execution_result = await executor.execute()
 
         completed_at = datetime.now(timezone.utc)
-        final_status = execution_result.get("status", "FAILED")
 
-        # 3. Save the final status and completion time.
+        final_status = execution_result.get(
+            "status",
+            "FAILED",
+        )
+
         db_run.status = final_status
         db_run.completed_at = completed_at
 
-        # 4. Persist every node result returned by the executor.
+        # Persist every node result, including skipped nodes.
         for result in execution_result.get("results", []):
             node_key = result["node_id"]
-            database_node_id = node_key_to_db_id.get(node_key)
+
+            database_node_id = node_key_to_db_id.get(
+                node_key
+            )
 
             if database_node_id is None:
                 raise ValueError(
@@ -325,10 +368,13 @@ async def execute_saved_workflow(
         db.commit()
         db.refresh(db_run)
 
-        # Use the persistent database run ID in the response.
         execution_result["run_id"] = db_run.id
         execution_result["status"] = db_run.status
-        execution_result["started_at"] = db_run.started_at.isoformat()
+        execution_result["started_at"] = (
+            db_run.started_at.isoformat()
+            if db_run.started_at
+            else None
+        )
         execution_result["completed_at"] = (
             db_run.completed_at.isoformat()
             if db_run.completed_at
@@ -345,26 +391,37 @@ async def execute_saved_workflow(
     except Exception as error:
         db.rollback()
 
-        # Keep a failed run in the database for later inspection.
-        db_run.status = "FAILED"
-        db_run.completed_at = datetime.now(timezone.utc)
-
+        # Record the failed execution for debugging.
         try:
+            db_run.status = "FAILED"
+            db_run.completed_at = datetime.now(timezone.utc)
+            db.add(db_run)
             db.commit()
+
         except Exception:
             db.rollback()
 
+        # Log details in the terminal, not in the public response.
+        print(f"Workflow execution failed: {error!r}")
+
         raise HTTPException(
             status_code=500,
-            detail="Workflow execution or result persistence failed",
+            detail=(
+                "Workflow execution or result persistence failed. "
+                "Check the backend terminal."
+            ),
         ) from error
+
+
+# --------------------------------------------------
+# LIST WORKFLOW RUNS
+# --------------------------------------------------
 
 @router.get("/{workflow_id}/runs")
 def get_workflow_runs(
     workflow_id: str,
     db: Session = Depends(get_db),
 ):
-    # Confirm that the workflow exists.
     db_workflow = (
         db.query(Workflow)
         .filter(Workflow.id == workflow_id)
@@ -377,7 +434,6 @@ def get_workflow_runs(
             detail="Workflow not found",
         )
 
-    # Fetch previous runs, newest first.
     runs = (
         db.query(WorkflowRun)
         .filter(WorkflowRun.workflow_id == workflow_id)
@@ -394,11 +450,13 @@ def get_workflow_runs(
                 "status": run.status,
                 "started_at": (
                     run.started_at.isoformat()
-                    if run.started_at else None
+                    if run.started_at
+                    else None
                 ),
                 "completed_at": (
                     run.completed_at.isoformat()
-                    if run.completed_at else None
+                    if run.completed_at
+                    else None
                 ),
             }
             for run in runs
@@ -406,13 +464,16 @@ def get_workflow_runs(
     }
 
 
+# --------------------------------------------------
+# GET WORKFLOW RUN DETAILS
+# --------------------------------------------------
+
 @router.get("/{workflow_id}/runs/{run_id}")
 def get_workflow_run_details(
     workflow_id: str,
     run_id: str,
     db: Session = Depends(get_db),
 ):
-    # Confirm that the workflow exists.
     db_workflow = (
         db.query(Workflow)
         .filter(Workflow.id == workflow_id)
@@ -425,7 +486,6 @@ def get_workflow_run_details(
             detail="Workflow not found",
         )
 
-    # Find this run under the specified workflow.
     db_run = (
         db.query(WorkflowRun)
         .filter(
@@ -441,7 +501,6 @@ def get_workflow_run_details(
             detail="Workflow run not found",
         )
 
-    # Get all node results for this run.
     node_runs = (
         db.query(NodeRun)
         .filter(NodeRun.workflow_run_id == db_run.id)
@@ -449,18 +508,22 @@ def get_workflow_run_details(
         .all()
     )
 
-    # Fetch node names and readable node keys.
-    node_ids = [item.node_id for item in node_runs]
+    node_ids = [
+        item.node_id
+        for item in node_runs
+    ]
 
     db_nodes = (
         db.query(WorkflowNode)
         .filter(WorkflowNode.id.in_(node_ids))
         .all()
-        if node_ids else []
+        if node_ids
+        else []
     )
 
     nodes_by_id = {
-        node.id: node for node in db_nodes
+        node.id: node
+        for node in db_nodes
     }
 
     return {
@@ -471,22 +534,26 @@ def get_workflow_run_details(
             "status": db_run.status,
             "started_at": (
                 db_run.started_at.isoformat()
-                if db_run.started_at else None
+                if db_run.started_at
+                else None
             ),
             "completed_at": (
                 db_run.completed_at.isoformat()
-                if db_run.completed_at else None
+                if db_run.completed_at
+                else None
             ),
             "nodes": [
                 {
                     "node_id": item.node_id,
                     "node_key": (
                         nodes_by_id[item.node_id].node_key
-                        if item.node_id in nodes_by_id else None
+                        if item.node_id in nodes_by_id
+                        else None
                     ),
                     "node_name": (
                         nodes_by_id[item.node_id].name
-                        if item.node_id in nodes_by_id else None
+                        if item.node_id in nodes_by_id
+                        else None
                     ),
                     "status": item.status,
                     "attempts": item.attempts,
@@ -495,17 +562,24 @@ def get_workflow_run_details(
                     "error": item.error,
                     "started_at": (
                         item.started_at.isoformat()
-                        if item.started_at else None
+                        if item.started_at
+                        else None
                     ),
                     "completed_at": (
                         item.completed_at.isoformat()
-                        if item.completed_at else None
+                        if item.completed_at
+                        else None
                     ),
                 }
                 for item in node_runs
             ],
         },
     }
+
+
+# --------------------------------------------------
+# UPDATE WORKFLOW NODE CONFIGURATION
+# --------------------------------------------------
 
 @router.patch("/{workflow_id}/nodes/{node_id}")
 def update_workflow_node(
@@ -514,7 +588,6 @@ def update_workflow_node(
     request: dict[str, Any],
     db: Session = Depends(get_db),
 ):
-    # Find the workflow.
     workflow = (
         db.query(Workflow)
         .filter(Workflow.id == workflow_id)
@@ -527,7 +600,6 @@ def update_workflow_node(
             detail="Workflow not found",
         )
 
-    # Find the requested node by its readable node key.
     node = (
         db.query(WorkflowNode)
         .filter(
@@ -543,11 +615,12 @@ def update_workflow_node(
             detail="Workflow node not found",
         )
 
-    # Only allow configuration updates through this endpoint.
     if not request or "config" not in request:
         raise HTTPException(
             status_code=400,
-            detail="Provide a non-empty request containing 'config'.",
+            detail=(
+                "Provide a non-empty request containing 'config'."
+            ),
         )
 
     new_config = request["config"]
@@ -558,12 +631,13 @@ def update_workflow_node(
             detail="'config' must be a JSON object.",
         )
 
-    # Merge settings instead of accidentally deleting existing ones.
     updated_config = dict(node.config or {})
     updated_config.update(new_config)
 
-    # Validate score settings for AI lead-scoring nodes.
-    if node.type == "ai" and updated_config.get("task") == "lead_scoring":
+    if (
+        node.type == "ai"
+        and updated_config.get("task") == "lead_scoring"
+    ):
         test_score = updated_config.get("test_score")
 
         if test_score is not None:
@@ -574,7 +648,10 @@ def update_workflow_node(
             ):
                 raise HTTPException(
                     status_code=400,
-                    detail="'test_score' must be a number from 0 to 100.",
+                    detail=(
+                        "'test_score' must be a number "
+                        "from 0 to 100."
+                    ),
                 )
 
     try:
@@ -583,7 +660,9 @@ def update_workflow_node(
         db.refresh(node)
 
         return {
-            "message": "Workflow node configuration updated successfully",
+            "message": (
+                "Workflow node configuration updated successfully"
+            ),
             "workflow_id": workflow.id,
             "node_id": node.node_key,
             "node_name": node.name,
@@ -597,9 +676,14 @@ def update_workflow_node(
             detail="Could not update workflow node configuration.",
         ) from error
 
+
+# --------------------------------------------------
+# PLAN WORKFLOW WITH AI
+# --------------------------------------------------
+
 @router.post("/plan")
 def plan_workflow_endpoint(
-    request: dict,
+    request: dict[str, Any],
 ):
     user_request = request.get("prompt", "").strip()
 
@@ -624,17 +708,24 @@ def plan_workflow_endpoint(
         }
 
     except Exception as error:
-        # Keep internal API keys and provider details out of the response.
-        print(f"Workflow planning failed: {error}")
+        print(f"Workflow planning failed: {error!r}")
 
         raise HTTPException(
             status_code=502,
-            detail="AI workflow planning failed. Check the backend terminal.",
+            detail=(
+                "AI workflow planning failed. "
+                "Check the backend terminal."
+            ),
         ) from error
+
+
+# --------------------------------------------------
+# PLAN AND SAVE WORKFLOW
+# --------------------------------------------------
 
 @router.post("/plan-and-save")
 def plan_and_save_workflow(
-    request: dict,
+    request: dict[str, Any],
     db: Session = Depends(get_db),
 ):
     user_request = request.get("prompt", "").strip()
@@ -652,14 +743,13 @@ def plan_and_save_workflow(
         )
 
     try:
-        # 1. Generate and validate the workflow with Gemini.
         workflow = plan_workflow(user_request)
 
-        # 2. Save the generated workflow and its nodes.
         db_workflow = Workflow(
             name=workflow.name,
             description=workflow.description,
         )
+
         db.add(db_workflow)
         db.flush()
 
@@ -674,12 +764,12 @@ def plan_and_save_workflow(
                 config=node.config,
                 retry_count=node.retry_count,
             )
+
             db.add(db_node)
             node_id_map[node.id] = db_node
 
         db.flush()
 
-        # 3. Save the connections between nodes.
         for edge in workflow.edges:
             db_edge = WorkflowEdge(
                 workflow_id=db_workflow.id,
@@ -687,13 +777,16 @@ def plan_and_save_workflow(
                 target_node_id=node_id_map[edge.target].id,
                 condition=edge.condition,
             )
+
             db.add(db_edge)
 
         db.commit()
         db.refresh(db_workflow)
 
         return {
-            "message": "AI workflow generated and saved successfully",
+            "message": (
+                "AI workflow generated and saved successfully"
+            ),
             "workflow_id": db_workflow.id,
             "name": db_workflow.name,
             "node_count": len(workflow.nodes),
@@ -703,9 +796,12 @@ def plan_and_save_workflow(
 
     except Exception as error:
         db.rollback()
-        print(f"Plan-and-save failed: {error}")
+        print(f"Plan-and-save failed: {error!r}")
 
         raise HTTPException(
             status_code=502,
-            detail="Workflow generation or saving failed. Check the backend terminal.",
+            detail=(
+                "Workflow generation or saving failed. "
+                "Check the backend terminal."
+            ),
         ) from error
