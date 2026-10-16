@@ -154,6 +154,8 @@ export default function Home() {
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
   const [workflowName, setWorkflowName] = useState("Lead Qualification");
+  const [savedWorkflowId, setSavedWorkflowId] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState("");
   const [running, setRunning] = useState(false);
   const [executionResult, setExecutionResult] = useState("");
@@ -184,6 +186,103 @@ export default function Home() {
     setNotice(`${item.label} node added`);
     window.setTimeout(() => setNotice(""), 2200);
   }
+  
+async function saveDraft() {
+  if (!workflowName.trim()) {
+    setNotice("Please enter a workflow name.");
+    return;
+  }
+
+  if (nodes.length === 0) {
+    setNotice("Add at least one node before saving.");
+    return;
+  }
+
+  setSaving(true);
+  setNotice("Saving workflow to Nexora database...");
+
+  try {
+    const backendTypes: Record<string, string> = {
+      trigger: "trigger",
+      ai: "ai",
+      condition: "condition",
+      email: "action",
+      delay: "action",
+    };
+
+    const workflowPayload = {
+      name: workflowName.trim(),
+      description: "Workflow created using Nexora visual builder.",
+      nodes: nodes.map((node) => {
+        const data = node.data as WorkflowData;
+
+        return {
+          id: node.id,
+          type: backendTypes[data.icon] ?? "action",
+          name: data.label,
+          config:
+            data.icon === "ai"
+              ? {
+                  task: "general",
+                  instructions: "Process the incoming workflow data.",
+                }
+              : data.icon === "condition"
+                ? {
+                    field: "score",
+                    operator: ">=",
+                    value: 70,
+                  }
+                : data.icon === "email"
+                  ? {
+                      action_type: "email",
+                    }
+                  : data.icon === "delay"
+                    ? {
+                        action_type: "delay",
+                        seconds: 5,
+                      }
+                    : {},
+          retry_count: 0,
+        };
+      }),
+      edges: edges.map((edge) => ({
+        source: edge.source,
+        target: edge.target,
+        condition:
+          typeof edge.label === "string" ? edge.label : null,
+      })),
+    };
+
+    const response = await fetch("http://127.0.0.1:8000/workflows/", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(workflowPayload),
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(
+        typeof data.detail === "string"
+          ? data.detail
+          : JSON.stringify(data.detail ?? data)
+      );
+    }
+
+    setSavedWorkflowId(data.workflow_id);
+    setNotice(`Workflow saved successfully! ID: ${data.workflow_id}`);
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Unknown error";
+
+    setNotice(`Save failed: ${message}`);
+  } finally {
+    setSaving(false);
+  }
+}
+
 
   
 async function runPreview() {
@@ -312,9 +411,14 @@ async function runPreview() {
             <p>Design, connect, and automate your business processes.</p>
           </div>
           <div className="heading-actions">
-            <button className="secondary-button" onClick={() => setNotice("Draft save is UI-only for now.")}>
-              <Save size={16} /> Save draft
-            </button>
+            <button
+  className="secondary-button"
+  onClick={saveDraft}
+  disabled={saving}
+>
+  <Save size={16} />
+  {saving ? "Saving..." : "Save draft"}
+</button>
             <button className="primary-button" onClick={runPreview} disabled={running}>
               <Play size={16} fill="currentColor" /> {running ? "Running..." : "Test workflow"}
             </button>
