@@ -156,6 +156,7 @@ export default function Home() {
   const [workflowName, setWorkflowName] = useState("Lead Qualification");
   const [notice, setNotice] = useState("");
   const [running, setRunning] = useState(false);
+  const [executionResult, setExecutionResult] = useState("");
 
   const onConnect = useCallback(
     (connection: Connection) =>
@@ -184,15 +185,56 @@ export default function Home() {
     window.setTimeout(() => setNotice(""), 2200);
   }
 
-  function runPreview() {
-    setRunning(true);
-    setNotice("Preview started — backend execution is not connected yet.");
-    window.setTimeout(() => {
-      setRunning(false);
-      setNotice("Preview finished. Connect the backend to run real workflows.");
-    }, 1600);
-    window.setTimeout(() => setNotice(""), 5000);
+  
+async function runPreview() {
+  setRunning(true);
+  setExecutionResult("");
+  setNotice("Sending workflow execution request to Nexora backend...");
+
+  try {
+    const workflowId = "25857b81-f36e-49ad-b1ee-9fb287dbdc80";
+
+    const response = await fetch(
+      `http://127.0.0.1:8000/workflows/${workflowId}/runs`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          input_data: {
+            name: "Aarav Sharma",
+            email: "aarav@example.com",
+            company: "Acme Technologies",
+            message:
+              "We need an AI-powered sales automation solution. Please share pricing and a demo.",
+          },
+        }),
+      }
+    );
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(
+        data.detail
+          ? JSON.stringify(data.detail)
+          : `Request failed with status ${response.status}`
+      );
+    }
+
+    setExecutionResult(JSON.stringify(data, null, 2));
+    setNotice("Backend execution request completed. Check the result below.");
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Unknown error";
+
+    setExecutionResult(`Error: ${message}`);
+    setNotice("Workflow request failed. Check the result below.");
+  } finally {
+    setRunning(false);
   }
+}
 
   const selected = nodes.find((node) => node.id === selectedNode);
 
@@ -360,6 +402,22 @@ export default function Home() {
             </aside>
           </div>
         </section>
+        
+{executionResult && (
+  <section className="execution-result">
+    <div className="execution-result-heading">
+      <strong>Execution response</strong>
+      <button
+        className="toolbar-button"
+        onClick={() => setExecutionResult("")}
+      >
+        Clear result
+      </button>
+    </div>
+    <pre>{executionResult}</pre>
+  </section>
+)}
+
         <footer className="footer-line"><span>© 2026 Nexora</span><span><span className="footer-status" /> All changes are local to this browser session</span></footer>
       </section>
 
