@@ -423,12 +423,33 @@ Return JSON only, with no Markdown.
     # CONDITION NODE
     # --------------------------------------------------
 
+    
     async def execute_condition(self, node, input_data=None):
         config = node.config or {}
 
         field = config.get("field")
         operator = config.get("operator")
         expected = config.get("value")
+
+        def find_field(data, field_name):
+            """Find a condition field inside nested AI output."""
+            if not isinstance(data, dict):
+                return None
+
+            # Direct match, e.g. {"score": 92}
+            if field_name in data:
+                return data[field_name]
+
+            # Common nested AI response, e.g.
+            # {"result": {"score": 92}}
+            for key in ("result", "output", "data"):
+                nested = data.get(key)
+                if isinstance(nested, dict):
+                    value = find_field(nested, field_name)
+                    if value is not None:
+                        return value
+
+            return None
 
         actual = None
 
@@ -437,16 +458,43 @@ Return JSON only, with no Markdown.
                 if not isinstance(parent_output, dict):
                     continue
 
-                output = parent_output.get("output")
+                # The AI node wraps its result in "output".
+                value = find_field(parent_output.get("output"), field)
 
-                if isinstance(output, dict) and field in output:
-                    actual = output[field]
+                # Also support a field directly on the parent output.
+                if value is None:
+                    value = find_field(parent_output, field)
+
+                if value is not None:
+                    actual = value
                     break
+
+        # Support either "score" or "lead_score" as a field name.
+        if actual is None and field in ("score", "lead_score"):
+            alternate_field = (
+                "lead_score" if field == "score" else "score"
+            )
+
+            if isinstance(input_data, dict):
+                for parent_output in input_data.values():
+                    if not isinstance(parent_output, dict):
+                        continue
+
+                    value = find_field(
+                        parent_output.get("output"),
+                        alternate_field,
+                    )
+
+                    if value is None:
+                        value = find_field(parent_output, alternate_field)
+
+                    if value is not None:
+                        actual = value
+                        break
 
         if actual is None:
             raise ValueError(
-                f"Condition field '{field}' "
-                "was not found in parent output"
+                f"Condition field '{field}' was not found in parent output"
             )
 
         comparisons = {
@@ -459,9 +507,7 @@ Return JSON only, with no Markdown.
         }
 
         if operator not in comparisons:
-            raise ValueError(
-                f"Unsupported operator: {operator}"
-            )
+            raise ValueError(f"Unsupported operator: {operator}")
 
         try:
             result = comparisons[operator](actual, expected)
