@@ -91,7 +91,7 @@ const initialNodes: WorkflowNode[] = [
       label: "New Website Lead",
       subtitle: "TRIGGER",
       icon: "trigger",
-      accent: "#60a5fa",
+      accent: "#9B826D",
     },
   },
   {
@@ -102,7 +102,7 @@ const initialNodes: WorkflowNode[] = [
       label: "Score Lead",
       subtitle: "AI PROCESSING",
       icon: "ai",
-      accent: "#c084fc",
+      accent: "#A77959",
     },
   },
   {
@@ -113,7 +113,7 @@ const initialNodes: WorkflowNode[] = [
       label: "Check Lead Score",
       subtitle: "CONDITION",
       icon: "condition",
-      accent: "#fbbf24",
+      accent: "#B58D5F",
     },
   },
   {
@@ -124,7 +124,7 @@ const initialNodes: WorkflowNode[] = [
       label: "Send Sales Email",
       subtitle: "ACTION",
       icon: "email",
-      accent: "#34d399",
+      accent: "#718B70",
     },
   },
 ];
@@ -142,11 +142,11 @@ const initialEdges: Edge[] = [
 ];
 
 const palette = [
-  { label: "Trigger", subtitle: "Start a workflow", icon: "trigger", accent: "#60a5fa" },
-  { label: "AI Processing", subtitle: "Use AI to decide", icon: "ai", accent: "#c084fc" },
-  { label: "Condition", subtitle: "Branch your flow", icon: "condition", accent: "#fbbf24" },
-  { label: "Send Email", subtitle: "Email action", icon: "email", accent: "#34d399" },
-  { label: "Delay", subtitle: "Wait before continuing", icon: "delay", accent: "#fb923c" },
+  { label: "Trigger", subtitle: "Start a workflow", icon: "trigger", accent: "#9B826D" },
+  { label: "AI Processing", subtitle: "Use AI to decide", icon: "ai", accent: "#A77959" },
+  { label: "Condition", subtitle: "Branch your flow", icon: "condition", accent: "#B58D5F" },
+  { label: "Send Email", subtitle: "Email action", icon: "email", accent: "#718B70" },
+  { label: "Delay", subtitle: "Wait before continuing", icon: "delay", accent: "#BD8966" },
 ];
 
 export default function Home() {
@@ -291,8 +291,12 @@ async function runPreview() {
   setNotice("Sending workflow execution request to Nexora backend...");
 
   try {
-    const workflowId = "25857b81-f36e-49ad-b1ee-9fb287dbdc80";
+    if (!savedWorkflowId) {
+  setNotice("Please save your workflow before testing it.");
+  return;
+}
 
+const workflowId = savedWorkflowId;
     const response = await fetch(
       `http://127.0.0.1:8000/workflows/${workflowId}/runs`,
       {
@@ -457,11 +461,11 @@ async function runPreview() {
                 maxZoom={1.5}
                 proOptions={{ hideAttribution: true }}
               >
-                <Background color="#273347" gap={22} size={1} />
+                <Background color="#D9C5B2" gap={22} size={1} />
                 <Controls />
                 <MiniMap
                   nodeColor={(node) => (node.data as WorkflowData).accent}
-                  maskColor="rgba(7, 12, 23, 0.72)"
+                  maskColor="rgba(247, 241, 233, 0.72)"
                 />
               </ReactFlow>
               <div className="canvas-hint"><span>↖</span> Drag nodes · Connect handles · Scroll to zoom</div>
